@@ -58,7 +58,6 @@ def check_targets():
         except json.JSONDecodeError:
             history_data = {}
 
-    # ▼ 変更点：CSVの内容に変更があったかをハッシュ値で検知
     current_csv_hash = hashlib.md5(csv_text.encode('utf-8')).hexdigest()
     csv_changed = False
     if current_csv_hash != history_data.get("csv_hash"):
@@ -90,8 +89,6 @@ def check_targets():
         last_run_time = history_data.get(f"{target_name}_last_run", 0)
         current_time = time.time()
         
-        # ▼ 変更点：「パーセンテージ」ではなく「絶対時間（マイナス150秒）」のバッファを採用
-        # 例：10分(600秒)設定なら 450秒経過で許可。70分(4200秒)なら 4050秒経過で許可。
         required_elapsed_seconds = max(0, (interval_minutes * 60) - 150)
         actual_elapsed_seconds = current_time - last_run_time
 
@@ -104,7 +101,7 @@ def check_targets():
         if driver is None:
             driver = webdriver.Chrome(options=options)
 
-        target_start_time = time.time() # サイトごとの計測開始
+        target_start_time = time.time() # 計測開始
 
         try:
             driver.get(target['url'])
@@ -119,7 +116,7 @@ def check_targets():
             if previous_text == "":
                 history_data[target_name] = current_text
             elif current_text != previous_text:
-                send_discord(f"🚨 【{target_name}】で内容に変化がありました！\n🔗 URL: {target['url']}")
+                send_discord(f" 【{target_name}】で内容に変化がありました\n URL: {target['url']}")
                 history_data[target_name] = current_text
             
             history_data[f"{target_name}_last_run"] = current_time
@@ -127,17 +124,39 @@ def check_targets():
         except Exception as e:
             print(f"❌ {target_name} の確認中にエラー発生。")
         
-        # サイトごとの実測処理時間を記録（コスト計算用）
+        # 実測時間を記録
         target_end_time = time.time()
         history_data[f"{target_name}_measured_sec"] = target_end_time - target_start_time
 
     if driver is not None:
         driver.quit()
 
-    # ▼ 変更点：CSVに変更があった場合、記録された実測値をもとに月間コストを計算して通知
+    # ==========================================
+    # ▼ コスト計算と内訳生成のロジック（アップデート部分）
+    # ==========================================
     if csv_changed:
         total_monthly_minutes = 0
+        breakdown_text = ""
         
+        # ① 基本システムの起動コストを計算
+        # GitHubのサーバー準備やpip installには毎回時間がかかるため、約25秒として推定
+        # ※一番短いintervalに合わせて全体が起動すると仮定して計算
+        min_interval = 10
+        for target in targets:
+            try:
+                iv = float(target.get('interval', 10))
+                if 0 < iv < min_interval:
+                    min_interval = iv
+            except ValueError:
+                pass
+                
+        runs_per_month_base = (30 * 24 * 60) / min_interval
+        base_overhead_min = runs_per_month_base * (25 / 60) # 1回あたり25秒消費
+        
+        total_monthly_minutes += base_overhead_min
+        breakdown_text += f"・⚙️ **基本コード実行**: 約 {int(base_overhead_min)} 分 (サーバー準備等)\n"
+        
+        # ② 各ターゲットの実測に基づくコストを計算
         for target in targets:
             if not target.get('name'): continue
             name = target['name']
@@ -148,18 +167,20 @@ def check_targets():
                 interval = 10
             if interval <= 0: interval = 10
             
-            # 実測値がない（エラー等）場合は安全マージンを取って30秒で計算
+            # 実測値がない場合は安全マージンを取って30秒で仮計算
             measured_sec = history_data.get(f"{name}_measured_sec", 30)
             
-            # 月間（30日）の実行回数 × 1回あたりの消費分数
             runs_per_month = (30 * 24 * 60) / interval
             target_monthly_min = runs_per_month * (measured_sec / 60)
+            
             total_monthly_minutes += target_monthly_min
+            breakdown_text += f"・🔍 **{name}**: 約 {int(target_monthly_min)} 分 (間隔:{interval}分 / 実測:{measured_sec:.1f}秒)\n"
 
         cost_message = (
-            f"📊 **監視リスト(CSV)の更新を検知しました**\n"
+            f" **監視リスト(CSV)の更新を検知しました**\n"
             f"実測時間に基づく現在のペースでの想定消費コスト:\n"
-            f"**約 {int(total_monthly_minutes)} / 2000 分 (月間)**"
+            f"**合計: 約 {int(total_monthly_minutes)} / 2000 分 (月間)**\n\n"
+            f"【月間コスト内訳】\n{breakdown_text}"
         )
         send_discord(cost_message)
         print(cost_message)
