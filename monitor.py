@@ -22,7 +22,7 @@ CSV_URL = os.environ.get("CSV_URL", "")
 
 def send_discord(message):
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
-        print("🔔 [通知シミュレーション] Discord設定がないためコンソール出力のみ:")
+        print("[通知シミュレーション] Discord設定がないためコンソール出力のみ:")
         print(f"   -> {message}")
         return
 
@@ -34,7 +34,7 @@ def send_discord(message):
     try:
         requests.post(url, headers=headers, json={"content": message})
     except Exception as e:
-        print(f"❌ 通知の送信に失敗しました: {e}")
+        print(f"[エラー] 通知の送信に失敗しました: {e}")
 
 def check_targets():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 本番監視プロセスを開始します...")
@@ -46,7 +46,7 @@ def check_targets():
         csv_text = res.text
         targets = list(csv.DictReader(io.StringIO(csv_text)))
     except Exception as e:
-        print(f"❌ スプレッドシートの読み込みに失敗しました: {e}")
+        print(f"[エラー] スプレッドシートの読み込みに失敗しました: {e}")
         return
 
     HISTORY_FILE = "history.json"
@@ -63,7 +63,7 @@ def check_targets():
     if current_csv_hash != history_data.get("csv_hash"):
         csv_changed = True
         history_data["csv_hash"] = current_csv_hash
-        print("🔄 スプレッドシートの変更を検知しました。コスト再計算を予約します。")
+        print("[情報] スプレッドシートの変更を検知しました。コスト再計算を予約します。")
 
     options = Options()
     options.add_argument('--headless')
@@ -93,10 +93,10 @@ def check_targets():
         actual_elapsed_seconds = current_time - last_run_time
 
         if actual_elapsed_seconds < required_elapsed_seconds:
-            print(f"⏩ {target_name}: スキップ（設定: {interval_minutes}分おき）")
+            print(f"[スキップ] {target_name} (設定: {interval_minutes}分おき)")
             continue
 
-        print(f"\n🔍 ターゲット確認中: {target_name}")
+        print(f"\n[確認中] {target_name}")
         
         if driver is None:
             driver = webdriver.Chrome(options=options)
@@ -116,13 +116,14 @@ def check_targets():
             if previous_text == "":
                 history_data[target_name] = current_text
             elif current_text != previous_text:
-                send_discord(f" 【{target_name}】で内容に変化がありました\n URL: {target['url']}")
+                # ★ メッセージをきれいに修正
+                send_discord(f"[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
                 history_data[target_name] = current_text
             
             history_data[f"{target_name}_last_run"] = current_time
 
         except Exception as e:
-            print(f"❌ {target_name} の確認中にエラー発生。")
+            print(f"[エラー] {target_name} の確認中にエラー発生。")
         
         # 実測時間を記録
         target_end_time = time.time()
@@ -132,15 +133,12 @@ def check_targets():
         driver.quit()
 
     # ==========================================
-    # ▼ コスト計算と内訳生成のロジック（アップデート部分）
+    # ▼ コスト計算と内訳生成のロジック
     # ==========================================
     if csv_changed:
         total_monthly_minutes = 0
         breakdown_text = ""
         
-        # ① 基本システムの起動コストを計算
-        # GitHubのサーバー準備やpip installには毎回時間がかかるため、約25秒として推定
-        # ※一番短いintervalに合わせて全体が起動すると仮定して計算
         min_interval = 10
         for target in targets:
             try:
@@ -151,12 +149,11 @@ def check_targets():
                 pass
                 
         runs_per_month_base = (30 * 24 * 60) / min_interval
-        base_overhead_min = runs_per_month_base * (25 / 60) # 1回あたり25秒消費
+        base_overhead_min = runs_per_month_base * (25 / 60)
         
         total_monthly_minutes += base_overhead_min
-        breakdown_text += f"・⚙️ **基本コード実行**: 約 {int(base_overhead_min)} 分 (サーバー準備等)\n"
+        breakdown_text += f"- 基本コード実行: 約 {int(base_overhead_min)} 分 (サーバー準備等)\n"
         
-        # ② 各ターゲットの実測に基づくコストを計算
         for target in targets:
             if not target.get('name'): continue
             name = target['name']
@@ -167,19 +164,19 @@ def check_targets():
                 interval = 10
             if interval <= 0: interval = 10
             
-            # 実測値がない場合は安全マージンを取って30秒で仮計算
             measured_sec = history_data.get(f"{name}_measured_sec", 30)
             
             runs_per_month = (30 * 24 * 60) / interval
             target_monthly_min = runs_per_month * (measured_sec / 60)
             
             total_monthly_minutes += target_monthly_min
-            breakdown_text += f"・🔍 **{name}**: 約 {int(target_monthly_min)} 分 (間隔:{interval}分 / 実測:{measured_sec:.1f}秒)\n"
+            breakdown_text += f"- {name}: 約 {int(target_monthly_min)} 分 (間隔:{interval}分 / 実測:{measured_sec:.1f}秒)\n"
 
+        # ★ メッセージをきれいに修正
         cost_message = (
-            f" **監視リスト(CSV)の更新を検知しました**\n"
+            f"[監視リスト更新]\n"
             f"実測時間に基づく現在のペースでの想定消費コスト:\n"
-            f"**合計: 約 {int(total_monthly_minutes)} / 2000 分 (月間)**\n\n"
+            f"合計: 約 {int(total_monthly_minutes)} / 2000 分 (月間)\n\n"
             f"【月間コスト内訳】\n{breakdown_text}"
         )
         send_discord(cost_message)
