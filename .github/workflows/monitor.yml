@@ -1,9 +1,6 @@
 name: Universal Cloud Monitor
 
 on:
-  schedule:
-    # 10分おきに自動実行
-    - cron: '*/10 * * * *'
   workflow_dispatch: # 手動実行用のボタン
 
 jobs:
