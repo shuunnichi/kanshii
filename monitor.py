@@ -117,7 +117,7 @@ def check_targets():
                 history_data[target_name] = current_text
             elif current_text != previous_text:
                 # ★ メッセージをきれいに修正
-                send_discord(f"<:spamangel:1517819467445440592>[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
+                send_discord(f"[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
                 history_data[target_name] = current_text
             
             history_data[f"{target_name}_last_run"] = current_time
@@ -174,7 +174,7 @@ def check_targets():
 
         # ★ メッセージをきれいに修正
         cost_message = (
-            f"[監視リスト更新]<:spamangel:1517819467445440592>\n"
+            f"[監視リスト更新]\n"
             f"実測時間に基づく現在のペースでの想定消費コスト:\n"
             f"合計: 約 {int(total_monthly_minutes)} 分 (月間)\n\n"
             f"【月間コスト内訳】\n{breakdown_text}"
