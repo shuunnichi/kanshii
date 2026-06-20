@@ -174,7 +174,7 @@ def check_targets():
 
         # ★ メッセージをきれいに修正
         cost_message = (
-            f"[監視リスト更新]\n"
+            f"[監視リスト更新]<:angel:1517819467445440592>\n"
             f"実測時間に基づく現在のペースでの想定消費コスト:\n"
             f"合計: 約 {int(total_monthly_minutes)} 分 (月間)\n\n"
             f"【月間コスト内訳】\n{breakdown_text}"
