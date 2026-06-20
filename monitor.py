@@ -117,7 +117,7 @@ def check_targets():
                 history_data[target_name] = current_text
             elif current_text != previous_text:
                 # ★ メッセージをきれいに修正
-                send_discord(f"[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
+                send_discord(f"<:angel:1517819467445440592>[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}<:angel:1517819467445440592>")
                 history_data[target_name] = current_text
             
             history_data[f"{target_name}_last_run"] = current_time
