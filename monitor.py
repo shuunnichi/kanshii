@@ -116,7 +116,6 @@ def check_targets():
             if previous_text == "":
                 history_data[target_name] = current_text
             elif current_text != previous_text:
-                # ★ メッセージをきれいに修正
                 send_discord(f"[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
                 history_data[target_name] = current_text
             
@@ -172,7 +171,6 @@ def check_targets():
             total_monthly_minutes += target_monthly_min
             breakdown_text += f"- {name}: 約 {int(target_monthly_min)} 分 (間隔:{interval}分 / 実測:{measured_sec:.1f}秒)\n"
 
-        # ★ メッセージをきれいに修正
         cost_message = (
             f"[監視リスト更新]\n"
             f"実測時間に基づく現在のペースでの想定消費コスト:\n"
@@ -182,8 +180,34 @@ def check_targets():
         send_discord(cost_message)
         print(cost_message)
 
+    # ==========================================
+    # ★【修正箇所】不要になった過去データをクレンジング
+    # ==========================================
+    cleaned_history = {}
+    
+    # 共通で必要なメタデータを引き継ぐ
+    if "csv_hash" in history_data:
+        cleaned_history["csv_hash"] = history_data["csv_hash"]
+        
+    # 現在のCSVに載っているターゲットのデータだけを抽出して移行
+    for target in targets:
+        name = target.get('name')
+        if not name:
+            continue
+            
+        # 1. 取得したテキスト内容
+        if name in history_data:
+            cleaned_history[name] = history_data[name]
+        # 2. 前回の実行時刻
+        if f"{name}_last_run" in history_data:
+            cleaned_history[f"{name}_last_run"] = history_data[f"{name}_last_run"]
+        # 3. 実測時間
+        if f"{name}_measured_sec" in history_data:
+            cleaned_history[f"{name}_measured_sec"] = history_data[f"{name}_measured_sec"]
+
+    # クレンジング後のデータを保存する
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history_data, f, ensure_ascii=False, indent=2)
+        json.dump(cleaned_history, f, ensure_ascii=False, indent=2)
 
 if __name__ == "__main__":
     check_targets()
