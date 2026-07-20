@@ -40,14 +40,26 @@ def check_targets():
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 本番監視プロセスを開始します...")
     
     # スプレッドシート（CSV）の読み込み
+    # スプレッドシート（CSV）の読み込み
     try:
         res = requests.get(CSV_URL)
+        res.raise_for_status() # ★追加: 200番台以外のHTTPエラー（404や500など）なら例外を発生させる
         res.encoding = 'utf-8'
         csv_text = res.text
+        
+        # ★追加: 取得したテキストが空、またはHTMLタグが含まれている（エラー画面）場合は弾く
+        if not csv_text.strip() or "<html" in csv_text.lower():
+            raise ValueError("CSVの内容が不正です（空データまたはエラーページを取得しました）")
+
         targets = list(csv.DictReader(io.StringIO(csv_text)))
+        
+        # ★追加: name列が存在しない場合も弾く
+        if targets and "name" not in targets[0]:
+             raise ValueError("CSVに 'name' 列が見つかりません。形式が間違っています。")
+
     except Exception as e:
         print(f"[エラー] スプレッドシートの読み込みに失敗しました: {e}")
-        return
+        return # 失敗した場合はここで処理を中断するため、誤ったコスト計算が走らない
 
     HISTORY_FILE = "history.json"
     history_data = {}
