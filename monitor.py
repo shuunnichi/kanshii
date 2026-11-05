@@ -35,17 +35,21 @@ HISTORY_FILE = "history.json"
 # ==========================================
 # ▼ Discord送受信
 # ==========================================
-def discord_post(content, file_paths=None, reply_to=None):
-    """メッセージ送信。file_pathsで添付、reply_toでそのメッセージへの返信にする"""
+def discord_post(content, file_paths=None, reply_to=None, silent=False):
+    """メッセージ送信。file_pathsで添付、reply_toでそのメッセージへの返信、
+    silent=Trueでスマホにプッシュ通知を出さない。送ったメッセージのIDを返す"""
     if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID:
         print(f"[通知シミュレーション] {content} / 添付: {file_paths}")
-        return
+        return None
 
     url = f"{API}/channels/{DISCORD_CHANNEL_ID}/messages"
     headers = {"Authorization": f"Bot {DISCORD_BOT_TOKEN}"}
     payload = {"content": content[:1990]}
     if reply_to:
         payload["message_reference"] = {"message_id": reply_to, "fail_if_not_exists": False}
+    if silent:
+        payload["flags"] = 4096  # SUPPRESS_NOTIFICATIONS（@silent と同じ）
+        payload["allowed_mentions"] = {"replied_user": False}
 
     opened = []
     try:
@@ -55,15 +59,30 @@ def discord_post(content, file_paths=None, reply_to=None):
                 f = open(path, "rb")
                 opened.append(f)
                 files[f"files[{i}]"] = (os.path.basename(path), f)
-            requests.post(url, headers=headers,
-                          data={"payload_json": json.dumps(payload)}, files=files)
+            res = requests.post(url, headers=headers,
+                                data={"payload_json": json.dumps(payload)}, files=files)
         else:
-            requests.post(url, headers=headers, json=payload)
+            res = requests.post(url, headers=headers, json=payload)
+        return res.json().get("id")
     except Exception as e:
         print(f"[エラー] Discord送信に失敗しました: {e}")
+        return None
     finally:
         for f in opened:
             f.close()
+
+
+def discord_edit(message_id, content):
+    """送信済みメッセージの本文を書き換える（通知は出ない）。成功したらTrue"""
+    if not DISCORD_BOT_TOKEN or not DISCORD_CHANNEL_ID or not message_id:
+        return False
+    try:
+        res = requests.patch(f"{API}/channels/{DISCORD_CHANNEL_ID}/messages/{message_id}",
+                             headers={"Authorization": f"Bot {DISCORD_BOT_TOKEN}"},
+                             json={"content": content[:1990]})
+        return res.ok
+    except Exception:
+        return False
 
 
 def send_discord(message):
@@ -343,6 +362,15 @@ def auto_bus_check(get_driver, target, history_data):
         print(f"[情報] {name} は延着なし: {site_msg}")
         if (target.get("debug") or "").strip() == "1":
             discord_post(f"[debug] {name} 延着なし判定 / サイトの表示: {site_msg}", ["result.png"])
+        # 通知なしのメッセージを1日1件だけ出し、2回目以降は確認時刻を書き換える
+        text = (f"[延着なし] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便"
+                f"（最終確認 {now.strftime('%H:%M')}）")
+        if history_data.get(f"{name}_none_date") == today and \
+                discord_edit(history_data.get(f"{name}_none_msg"), text):
+            pass
+        else:
+            history_data[f"{name}_none_msg"] = discord_post(text, silent=True)
+            history_data[f"{name}_none_date"] = today
     return True
 
 
@@ -406,7 +434,7 @@ def handle_command(driver_getter, msg_id, text, targets, history_data):
                 discord_post(f"[延着証明あり] {label}" + (f"\n本物のページ: <{link}>" if link else ""),
                              ["result.png"], msg_id)
             elif result == "none":
-                discord_post(f"[延着なし] {label}\nサイトの表示: {site_msg}", ["result.png"], msg_id)
+                discord_post(f"[延着なし] {label}（{site_msg}）", reply_to=msg_id, silent=True)
 
     elif cmd in ("check", "確認"):
         if not args:
@@ -650,7 +678,8 @@ def check_targets():
         name = target.get('name')
         if not name:
             continue
-        for key in (name, f"{name}_last_run", f"{name}_measured_sec", f"{name}_sent_date"):
+        for key in (name, f"{name}_last_run", f"{name}_measured_sec", f"{name}_sent_date",
+                    f"{name}_none_date", f"{name}_none_msg"):
             if key in history_data:
                 cleaned_history[key] = history_data[key]
 
