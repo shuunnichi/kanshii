@@ -282,6 +282,40 @@ def search_bus_delay(driver, target, day, h, m, reply_to=None):
     return "none", result
 
 
+def bus_cert_link(target, day, h, m):
+    """本物の証明書ページへ飛ぶリンクを作る（GitHub Pagesの delay.html を経由してPOSTする）。
+    延着時間は公式サイトのAPIから取得した値をそのまま使う"""
+    params = {
+        "companyid": "744",
+        "name1": requests.utils.quote(target["from_stop"].strip(), safe=""),
+        "name2": requests.utils.quote(target["to_stop"].strip(), safe=""),
+        "day": day.strftime("%Y/%m/%d"),
+        "hour": f"{h:02d}",
+        "min": f"{m // 10 * 10:02d}",
+    }
+    try:
+        body = "&".join(f"{k}={v}" for k, v in params.items())
+        res = requests.post("https://delay.mobustation.jp/delay/Handler/GetDelayTime.ashx",
+                            data=body, headers={"Content-Type": "application/x-www-form-urlencoded"},
+                            timeout=15)
+        delay = res.json().get("DelayTime")
+    except Exception as e:
+        print(f"[警告] 延着時間の取得に失敗: {e}")
+        return ""
+    if not delay:
+        return ""
+
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    base = os.environ.get("DELAY_LINK_BASE") or (
+        f"https://{repo.split('/')[0].lower()}.github.io/{repo.split('/')[1]}/delay.html" if "/" in repo else "")
+    if not base:
+        return ""
+    q = requests.compat.urlencode({
+        "from": target["from_stop"].strip(), "to": target["to_stop"].strip(),
+        "day": params["day"], "hour": params["hour"], "min": params["min"], "delay": delay})
+    return f"{base}?{q}"
+
+
 def auto_bus_check(get_driver, target, history_data):
     """乗車時刻の40分後〜2時間後の間に検索し、見つかったら1日1回だけ送信。
     軽い判定を先に済ませ、検索するときだけChromeを起動する"""
@@ -301,8 +335,9 @@ def auto_bus_check(get_driver, target, history_data):
 
     result, site_msg = search_bus_delay(get_driver(), target, now.date(), h, m)
     if result == "found":
-        discord_post(f"[延着証明] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便",
-                     ["result.png"])
+        link = bus_cert_link(target, now.date(), h, m)
+        discord_post(f"[延着証明] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便"
+                     + (f"\n本物のページ: <{link}>" if link else ""), ["result.png"])
         history_data[f"{name}_sent_date"] = today
     elif result == "none":
         print(f"[情報] {name} は延着なし: {site_msg}")
@@ -367,7 +402,9 @@ def handle_command(driver_getter, msg_id, text, targets, history_data):
             result, site_msg = search_bus_delay(driver_getter(), t, day, h, m, reply_to=msg_id)
             label = f"{t['name']} {day.month}/{day.day} {h}:{m:02d}頃"
             if result == "found":
-                discord_post(f"[延着証明あり] {label}", ["result.png"], msg_id)
+                link = bus_cert_link(t, day, h, m)
+                discord_post(f"[延着証明あり] {label}" + (f"\n本物のページ: <{link}>" if link else ""),
+                             ["result.png"], msg_id)
             elif result == "none":
                 discord_post(f"[延着なし] {label}\nサイトの表示: {site_msg}", ["result.png"], msg_id)
 
