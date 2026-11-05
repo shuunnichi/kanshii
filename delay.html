@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>延着証明へ移動中</title>
+<style>
+  body { font-family: sans-serif; text-align: center; padding: 48px 16px; color: #333; background: #fff; }
+  button { font-size: 16px; padding: 10px 20px; margin-top: 16px; }
+</style>
+</head>
+<body>
+<p id="msg">京阪バスの延着証明ページへ移動しています…</p>
+<form id="f" method="post" action="https://delay.mobustation.jp/delay/print.aspx" accept-charset="Shift_JIS">
+  <noscript><p>JavaScriptを有効にしてください。</p></noscript>
+  <button type="submit" id="btn" hidden>延着証明を開く</button>
+</form>
+<script>
+  // 公式サイト（main.js）と同じ形式でフォームを組み立てて送信する
+  const q = new URLSearchParams(location.search);
+  const data = {
+    companyid: q.get("c") || "744",
+    name1: encodeURIComponent(q.get("from") || ""),
+    name2: encodeURIComponent(q.get("to") || ""),
+    day: q.get("day") || "",
+    hour: q.get("hour") || "",
+    min: q.get("min") || "",
+    delayTime: q.get("delay") || ""
+  };
+  const f = document.getElementById("f");
+  for (const k in data) {
+    const i = document.createElement("input");
+    i.type = "hidden"; i.name = k; i.value = data[k];
+    f.appendChild(i);
+  }
+  if (data.name1 && data.name2 && data.day) {
+    f.submit();
+    setTimeout(() => { document.getElementById("btn").hidden = false; }, 2000);
+  } else {
+    document.getElementById("msg").textContent = "リンクの情報が足りません。";
+  }
+</script>
+</body>
+</html>
