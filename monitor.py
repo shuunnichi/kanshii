@@ -282,23 +282,24 @@ def search_bus_delay(driver, target, day, h, m, reply_to=None):
     return "none", result
 
 
-def auto_bus_check(driver, target, history_data):
-    """乗車時刻の40分後〜3時間後の間に検索し、見つかったら1日1回だけ送信"""
+def auto_bus_check(get_driver, target, history_data):
+    """乗車時刻の40分後〜2時間後の間に検索し、見つかったら1日1回だけ送信。
+    軽い判定を先に済ませ、検索するときだけChromeを起動する"""
     name = target["name"]
     now = datetime.now(JST)
     today = now.strftime("%Y-%m-%d")
 
     if history_data.get(f"{name}_sent_date") == today:
         print(f"[スキップ] {name} (本日送信済み)")
-        return
+        return False
 
     h, m = map(int, target["ride_time"].split(":"))
     ride = now.replace(hour=h, minute=m, second=0, microsecond=0)
-    if not (ride + timedelta(minutes=40) <= now <= ride + timedelta(hours=3)):
+    if not (ride + timedelta(minutes=40) <= now <= ride + timedelta(hours=2)):
         print(f"[スキップ] {name} (確認時間外)")
-        return
+        return False
 
-    result, site_msg = search_bus_delay(driver, target, now.date(), h, m)
+    result, site_msg = search_bus_delay(get_driver(), target, now.date(), h, m)
     if result == "found":
         discord_post(f"[延着証明] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便",
                      ["result.png"])
@@ -307,6 +308,7 @@ def auto_bus_check(driver, target, history_data):
         print(f"[情報] {name} は延着なし: {site_msg}")
         if (target.get("debug") or "").strip() == "1":
             discord_post(f"[debug] {name} 延着なし判定 / サイトの表示: {site_msg}", ["result.png"])
+    return True
 
 
 # ==========================================
@@ -387,6 +389,92 @@ def handle_command(driver_getter, msg_id, text, targets, history_data):
         discord_post(f"「!{cmd}」は不明なコマンドです。`!help` で一覧を表示します", reply_to=msg_id)
 
 
+def ensure_japanese_font():
+    """スクショの日本語が□にならないよう、日本語フォントが無ければ入れる（Chromeを使う回だけ）"""
+    import subprocess
+    try:
+        out = subprocess.run(["fc-list", ":lang=ja"], capture_output=True, text=True).stdout
+        if out.strip():
+            return
+        cmd = ["sudo", "apt-get", "install", "-y", "-qq", "--no-install-recommends", "fonts-ipafont-gothic"]
+        if subprocess.run(cmd, capture_output=True).returncode != 0:
+            subprocess.run(["sudo", "apt-get", "update", "-qq"], capture_output=True)
+            subprocess.run(cmd, capture_output=True)
+        print("[情報] 日本語フォントをインストールしました")
+    except Exception as e:
+        print(f"[警告] 日本語フォントの準備に失敗: {e}")
+
+
+def repo_is_private():
+    """GitHub Actionsのイベント情報からリポジトリが非公開か調べる（不明ならNone）"""
+    try:
+        with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as f:
+            return json.load(f)["repository"]["private"]
+    except Exception:
+        return None
+
+
+def build_cost_message(targets, history_data):
+    def interval_of(t):
+        try:
+            v = float(t.get("interval", 10))
+            return v if v > 0 else 10
+        except ValueError:
+            return 10
+
+    # 起動間隔は「一番短いinterval（最大10分）」と見なす（workflowのcronに合わせておく）
+    cron_min = min([10] + [interval_of(t) for t in targets if t.get("name")])
+    runs = 30 * 24 * 60 / cron_min
+
+    # 今から30日分を10分刻みでなぞり、scheduleで動く割合を計算する
+    start = datetime.now(JST).replace(second=0, microsecond=0)
+    slots = [start + timedelta(minutes=10 * i) for i in range(30 * 24 * 6)]
+
+    lines = []
+    work_sec_total = 0
+    for t in targets:
+        if not t.get("name"):
+            continue
+        name = t["name"]
+        sched = (t.get("schedule") or "").strip() or "always"
+        iv = interval_of(t)
+        sec = history_data.get(f"{name}_measured_sec", 30)
+
+        if (t.get("type") or "").strip() == "bus_delay":
+            h, m = map(int, t["ride_time"].split(":"))
+            days = {(start + timedelta(days=d)).date() for d in range(30)}
+            active_days = sum(1 for d in days if is_active(
+                t.get("schedule"), datetime(d.year, d.month, d.day, h, m, tzinfo=JST) + timedelta(minutes=40)))
+            checks = active_days * (int(80 // iv) + 1)
+            detail = f"{active_days}日 × 最大{int(80 // iv) + 1}回"
+        else:
+            ratio = sum(1 for x in slots if is_active(t.get("schedule"), x)) / len(slots)
+            checks = 30 * 24 * 60 * ratio / iv
+            detail = f"稼働{ratio * 100:.0f}% / {iv:g}分おき"
+
+        work = checks * sec
+        work_sec_total += work
+        lines.append(f"- {name}: 約{int(work / 60)}分（{sched} / {detail} / 1回{sec:.0f}秒）")
+
+    per_run_sec = 25 + work_sec_total / runs
+    billed = runs * max(1, -(-per_run_sec // 60))
+
+    private = repo_is_private()
+    if private is False:
+        plan = "公開リポジトリ → GitHub Actionsは無料（上限なし）"
+    elif private is True:
+        plan = "非公開リポジトリ → 無料枠は月約2000分" + ("　⚠️超える見込み" if billed > 2000 else "　OK")
+    else:
+        plan = "リポジトリの公開設定は不明"
+
+    return (
+        "[監視リスト更新]\n"
+        f"{plan}\n"
+        f"想定: 約{int(billed)}分/月（{int(runs)}回起動 × 1回約{per_run_sec:.0f}秒 → 1回ごとに1分単位で切り上げ）\n\n"
+        "【内訳（作業時間）】\n" + "\n".join(lines)
+    )
+
+
 # ==========================================
 # ▼ メイン処理
 # ==========================================
@@ -441,6 +529,7 @@ def check_targets():
 
     def get_driver():
         if driver_box["d"] is None:
+            ensure_japanese_font()
             driver_box["d"] = webdriver.Chrome(options=options)
         return driver_box["d"]
 
@@ -482,9 +571,10 @@ def check_targets():
         print(f"\n[確認中] {target_name} ({target_type})")
         target_start_time = time.time()
 
+        did_work = True
         try:
             if target_type == "bus_delay":
-                auto_bus_check(get_driver(), target, history_data)
+                did_work = auto_bus_check(get_driver, target, history_data)
             else:
                 result = check_monitor(get_driver(), target, history_data)
                 if result == "changed":
@@ -497,57 +587,17 @@ def check_targets():
             if target_type == "bus_delay":
                 debug_dump(get_driver(), target_name, f"例外: {e}")
 
-        history_data[f"{target_name}_measured_sec"] = time.time() - target_start_time
+        if did_work:
+            history_data[f"{target_name}_measured_sec"] = time.time() - target_start_time
 
     if driver_box["d"] is not None:
         driver_box["d"].quit()
 
     # ==========================================
-    # ▼ コスト計算と内訳生成のロジック（変更なし）
+    # ▼ コスト計算（scheduleを反映 / 1回の起動ごとに1分単位で切り上げて課金される）
     # ==========================================
     if csv_changed:
-        total_monthly_minutes = 0
-        breakdown_text = ""
-
-        min_interval = 10
-        for target in targets:
-            try:
-                iv = float(target.get('interval', 10))
-                if 0 < iv < min_interval:
-                    min_interval = iv
-            except ValueError:
-                pass
-
-        runs_per_month_base = (30 * 24 * 60) / min_interval
-        base_overhead_min = runs_per_month_base * (25 / 60)
-
-        total_monthly_minutes += base_overhead_min
-        breakdown_text += f"- 基本コード実行: 約 {int(base_overhead_min)} 分 (サーバー準備等)\n"
-
-        for target in targets:
-            if not target.get('name'): continue
-            name = target['name']
-
-            try:
-                interval = float(target.get('interval', 10))
-            except ValueError:
-                interval = 10
-            if interval <= 0: interval = 10
-
-            measured_sec = history_data.get(f"{name}_measured_sec", 30)
-
-            runs_per_month = (30 * 24 * 60) / interval
-            target_monthly_min = runs_per_month * (measured_sec / 60)
-
-            total_monthly_minutes += target_monthly_min
-            breakdown_text += f"- {name}: 約 {int(target_monthly_min)} 分 (間隔:{interval}分 / 実測:{measured_sec:.1f}秒)\n"
-
-        cost_message = (
-            f"[監視リスト更新]\n"
-            f"実測時間に基づく現在のペースでの想定消費コスト:\n"
-            f"合計: 約 {int(total_monthly_minutes)} 分 (月間)\n\n"
-            f"【月間コスト内訳】\n{breakdown_text}"
-        )
+        cost_message = build_cost_message(targets, history_data)
         send_discord(cost_message)
         print(cost_message)
 
