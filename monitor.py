@@ -326,30 +326,12 @@ def bus_cert_link(target, day, h, m, delay):
     return f"{base}?{q}"
 
 
-def bus_cert_screenshot(get_driver, target, day, h, m, delay):
-    """延着があったときだけ、本物の証明書ページ（print.aspx）をChromeで開いて撮影する"""
-    try:
-        driver = get_driver()
-        driver.get(target["url"])
-        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "search")))
-        data = bus_params(target, day, h, m)
-        data["delayTime"] = delay
-        driver.execute_script("open_preview(arguments[0]);", data)  # サイト自身の画面遷移関数
-        WebDriverWait(driver, 20).until(lambda d: "print.aspx" in d.current_url)
-        time.sleep(1)
-        driver.save_screenshot("result.png")
-        return ["result.png"]
-    except Exception as e:
-        print(f"[警告] 証明書の撮影に失敗: {e}")
-        return None
-
-
 def report_bus_found(get_driver, target, day, h, m, delay, reply_to=None):
-    label = f"{target['name']} {day.month}/{day.day} {h}:{m:02d}頃の便（最大{delay}分）"
+    """延着ありを文字だけで通知する（画像なし・Chrome不要）。証明書はリンク先の本物のページで見る"""
+    label = f"{target['name']} {day.month}/{day.day} {h}:{m:02d}頃の便"
     link = bus_cert_link(target, day, h, m, delay)
-    files = bus_cert_screenshot(get_driver, target, day, h, m, delay)
-    discord_post(f"[延着証明] {label}" + (f"\n本物のページ: <{link}>" if link else ""),
-                 files, reply_to)
+    discord_post(f"[延着証明] {label}：最大 **{delay}分** 遅延"
+                 + (f"\n本物の証明書: <{link}>" if link else ""), reply_to=reply_to)
 
 
 def auto_bus_check(get_driver, target, history_data):
