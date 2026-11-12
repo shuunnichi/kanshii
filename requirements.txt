@@ -1,2 +1,4 @@
 selenium
 requests
+beautifulsoup4
+jpholiday

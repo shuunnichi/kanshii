@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 try:
@@ -217,127 +217,144 @@ def is_active(schedule, now):
 # ==========================================
 # ▼ ページ変化監視（type空欄 / monitor）
 # ==========================================
-def check_monitor(driver, target, history_data, screenshot=False):
-    """戻り値: "first"（初回）/ "changed" / "same" """
+def fetch_static_text(url, selector):
+    """Chromeを使わずにHTMLを取得してCSSセレクタの文字を取り出す。見つからなければNone"""
+    try:
+        from bs4 import BeautifulSoup
+        res = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 (kanshii monitor)"})
+        res.raise_for_status()
+        res.encoding = res.apparent_encoding or res.encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+        for tag in soup(["script", "style", "noscript", "template"]):
+            tag.decompose()  # 画面に表示されない部分は比較しない（Chromeの結果に合わせる）
+        elems = soup.select(selector)
+        if not elems:
+            return None
+        return "\n".join(e.get_text("\n", strip=True) for e in elems)
+    except Exception as e:
+        print(f"[情報] 軽量取得に失敗したのでChromeを使います: {e}")
+        return None
+
+
+def check_monitor(get_driver, target, history_data, screenshot=False):
+    """
+    戻り値: "first"（初回）/ "changed" / "same"
+    まずChromeなしで取得し（数秒で終わる）、JavaScriptで作られるページなどで
+    取れなかったときだけChromeを使う。どちらで取ったかを記録し、方法が変わった回は比較しない。
+    screenshot=True（!check）のときは、比較とは別にChromeでページを撮影して check.png に保存する。
+    """
     name = target["name"]
-    driver.get(target["url"])
-    elements = WebDriverWait(driver, 20).until(
-        EC.presence_of_all_elements_located((By.CSS_SELECTOR, target["wait_element"]))
-    )
-    time.sleep(2)
-    if screenshot:
-        driver.save_screenshot("check.png")
+    url, selector = target["url"], target["wait_element"]
 
-    current_text = "\n".join([elem.text.strip() for elem in elements])
-    previous_text = history_data.get(name, "")
-    history_data[name] = current_text
+    text = fetch_static_text(url, selector)
+    mode = "static"
+    if text is None or screenshot:
+        driver = get_driver()
+        driver.get(url)
+        elements = WebDriverWait(driver, 20).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector)))
+        time.sleep(2)
+        if screenshot:
+            driver.save_screenshot("check.png")
+        if text is None:
+            mode = "chrome"
+            text = "\n".join(e.text.strip() for e in elements)
 
-    if previous_text == "":
+    previous = history_data.get(name, "")
+    same_mode = history_data.get(f"{name}_mode", "chrome") == mode
+    history_data[name] = text
+    history_data[f"{name}_mode"] = mode
+
+    if previous == "" or not same_mode:
         return "first"
-    return "changed" if current_text != previous_text else "same"
+    return "changed" if text != previous else "same"
 
 
 # ==========================================
 # ▼ 京阪バス延着証明（type: bus_delay）
 # ==========================================
-def debug_dump(driver, name, reason, reply_to=None):
-    """失敗時にスクショとHTMLをDiscordへ送る（修正用）"""
-    try:
-        driver.save_screenshot("debug.png")
-        with open("debug.html", "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        discord_post(f"[要確認] {name}: {reason}\n（このHTMLを貼れば修正できます）",
-                     ["debug.png", "debug.html"], reply_to)
-    except Exception as e:
-        print(f"[エラー] デバッグ情報の送信に失敗: {e}")
+BUS_BASE = "https://delay.mobustation.jp/delay/"
+BUS_COMPANY_ID = "744"  # 京阪バス
 
 
-def search_bus_delay(driver, target, day, h, m, reply_to=None):
-    """
-    延着証明を検索する。戻り値: ("found" | "none" | "error", サイトのメッセージ)
-    サイトの仕組み: 停留所名(name1/name2)と日時(day/hour/min)を入れて「検索・発行」を押すと、
-    延着があれば print.aspx（証明書）に移動し、なければ #err-msg1 にメッセージが出る。
-    結果画面は result.png に保存する。
-    """
-    name = target["name"]
-    driver.get(target["url"])
-    WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "search")))
-
-    # 停留所名は自動補完に頼らず値を直接入れる（サイトの表記と完全一致させる）
-    driver.execute_script(
-        "document.getElementById('name1').value = arguments[0];"
-        "document.getElementById('name2').value = arguments[1];",
-        target["from_stop"].strip(), target["to_stop"].strip())
-
-    try:
-        Select(driver.find_element(By.ID, "day")).select_by_value(day.strftime("%Y/%m/%d"))
-    except Exception:
-        debug_dump(driver, name, f"日付 {day} が選択肢にありません（7日以内のみ）", reply_to)
-        return "error", ""
-    Select(driver.find_element(By.ID, "hour")).select_by_value(f"{h:02d}")
-    Select(driver.find_element(By.ID, "min")).select_by_value(f"{m // 10 * 10:02d}")
-
-    driver.find_element(By.ID, "search").click()
-
-    def finished(d):
-        if "print.aspx" in d.current_url:
-            return "found"
-        try:
-            msg = d.find_element(By.ID, "err-msg1").text.strip()
-        except Exception:
-            msg = ""
-        return msg or False
-
-    try:
-        result = WebDriverWait(driver, 20).until(finished)
-    except Exception:
-        debug_dump(driver, name, "検索結果が20秒以内に表示されませんでした", reply_to)
-        return "error", ""
-
-    time.sleep(1)
-    driver.save_screenshot("result.png")
-    if result == "found":
-        return "found", ""
-    return "none", result
-
-
-def bus_cert_link(target, day, h, m):
-    """本物の証明書ページへ飛ぶリンクを作る（GitHub Pagesの delay.html を経由してPOSTする）。
-    延着時間は公式サイトのAPIから取得した値をそのまま使う"""
-    params = {
-        "companyid": "744",
+def bus_params(target, day, h, m):
+    """公式サイト（main.js）と同じ形式のパラメータ。停留所名はURLエンコード済みで送る"""
+    return {
+        "companyid": BUS_COMPANY_ID,
         "name1": requests.utils.quote(target["from_stop"].strip(), safe=""),
         "name2": requests.utils.quote(target["to_stop"].strip(), safe=""),
         "day": day.strftime("%Y/%m/%d"),
         "hour": f"{h:02d}",
         "min": f"{m // 10 * 10:02d}",
     }
-    try:
-        body = "&".join(f"{k}={v}" for k, v in params.items())
-        res = requests.post("https://delay.mobustation.jp/delay/Handler/GetDelayTime.ashx",
-                            data=body, headers={"Content-Type": "application/x-www-form-urlencoded"},
-                            timeout=15)
-        delay = res.json().get("DelayTime")
-    except Exception as e:
-        print(f"[警告] 延着時間の取得に失敗: {e}")
-        return ""
-    if not delay:
-        return ""
 
+
+def search_bus_delay(target, day, h, m):
+    """
+    公式サイトが「検索・発行」で使うAPIに直接問い合わせる（Chrome不要・1秒程度）。
+    戻り値: ("found", 延着分) / ("none", サイトのメッセージ) / ("error", 理由)
+    """
+    params = bus_params(target, day, h, m)
+    body = "&".join(f"{k}={v}" for k, v in params.items())
+    try:
+        res = requests.post(BUS_BASE + "Handler/GetDelayTime.ashx", data=body, timeout=20,
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})
+        data = res.json()
+    except Exception as e:
+        return "error", f"延着証明サイトに接続できませんでした: {e}"
+
+    msg = (data.get("msg") or "").strip()
+    delay = data.get("DelayTime")
+    if msg:
+        return "none", msg
+    if delay:
+        return "found", delay
+    return "error", f"想定外の応答: {data}"
+
+
+def bus_cert_link(target, day, h, m, delay):
+    """本物の証明書ページへ飛ぶリンク（GitHub Pagesの delay.html を経由してPOSTする）"""
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     base = os.environ.get("DELAY_LINK_BASE") or (
         f"https://{repo.split('/')[0].lower()}.github.io/{repo.split('/')[1]}/delay.html" if "/" in repo else "")
     if not base:
         return ""
+    p = bus_params(target, day, h, m)
     q = requests.compat.urlencode({
         "from": target["from_stop"].strip(), "to": target["to_stop"].strip(),
-        "day": params["day"], "hour": params["hour"], "min": params["min"], "delay": delay})
+        "day": p["day"], "hour": p["hour"], "min": p["min"], "delay": delay})
     return f"{base}?{q}"
 
 
+def bus_cert_screenshot(get_driver, target, day, h, m, delay):
+    """延着があったときだけ、本物の証明書ページ（print.aspx）をChromeで開いて撮影する"""
+    try:
+        driver = get_driver()
+        driver.get(target["url"])
+        WebDriverWait(driver, 20).until(EC.presence_of_element_located((By.ID, "search")))
+        data = bus_params(target, day, h, m)
+        data["delayTime"] = delay
+        driver.execute_script("open_preview(arguments[0]);", data)  # サイト自身の画面遷移関数
+        WebDriverWait(driver, 20).until(lambda d: "print.aspx" in d.current_url)
+        time.sleep(1)
+        driver.save_screenshot("result.png")
+        return ["result.png"]
+    except Exception as e:
+        print(f"[警告] 証明書の撮影に失敗: {e}")
+        return None
+
+
+def report_bus_found(get_driver, target, day, h, m, delay, reply_to=None):
+    label = f"{target['name']} {day.month}/{day.day} {h}:{m:02d}頃の便（最大{delay}分）"
+    link = bus_cert_link(target, day, h, m, delay)
+    files = bus_cert_screenshot(get_driver, target, day, h, m, delay)
+    discord_post(f"[延着証明] {label}" + (f"\n本物のページ: <{link}>" if link else ""),
+                 files, reply_to)
+
+
 def auto_bus_check(get_driver, target, history_data):
-    """乗車時刻の40分後〜2時間後の間に検索し、見つかったら1日1回だけ送信。
-    軽い判定を先に済ませ、検索するときだけChromeを起動する"""
+    """乗車時刻の40分後〜2時間後の間に検索し、見つかったら1日1回だけ通知付きで送信。
+    延着なしは通知なしのメッセージ1件を書き換え続ける。戻り値: 実際に検索したか"""
     name = target["name"]
     now = datetime.now(JST)
     today = now.strftime("%Y-%m-%d")
@@ -346,32 +363,35 @@ def auto_bus_check(get_driver, target, history_data):
         print(f"[スキップ] {name} (本日送信済み)")
         return False
 
-    h, m = map(int, target["ride_time"].split(":"))
+    h, m = parse_hm(target.get("ride_time"))
     ride = now.replace(hour=h, minute=m, second=0, microsecond=0)
     if not (ride + timedelta(minutes=40) <= now <= ride + timedelta(hours=2)):
         print(f"[スキップ] {name} (確認時間外)")
         return False
 
-    result, site_msg = search_bus_delay(get_driver(), target, now.date(), h, m)
+    result, info = search_bus_delay(target, now.date(), h, m)
     if result == "found":
-        link = bus_cert_link(target, now.date(), h, m)
-        discord_post(f"[延着証明] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便"
-                     + (f"\n本物のページ: <{link}>" if link else ""), ["result.png"])
+        report_bus_found(get_driver, target, now.date(), h, m, info)
         history_data[f"{name}_sent_date"] = today
     elif result == "none":
-        print(f"[情報] {name} は延着なし: {site_msg}")
-        if (target.get("debug") or "").strip() == "1":
-            discord_post(f"[debug] {name} 延着なし判定 / サイトの表示: {site_msg}", ["result.png"])
-        # 通知なしのメッセージを1日1件だけ出し、2回目以降は確認時刻を書き換える
-        text = (f"[延着なし] {name} {now.strftime('%m/%d')} {target['ride_time']}頃の便"
+        print(f"[情報] {name} は延着なし: {info}")
+        text = (f"[延着なし] {name} {now.strftime('%m/%d')} {h}:{m:02d}頃の便"
                 f"（最終確認 {now.strftime('%H:%M')}）")
-        if history_data.get(f"{name}_none_date") == today and \
-                discord_edit(history_data.get(f"{name}_none_msg"), text):
-            pass
-        else:
+        if not (history_data.get(f"{name}_none_date") == today and
+                discord_edit(history_data.get(f"{name}_none_msg"), text)):
             history_data[f"{name}_none_msg"] = discord_post(text, silent=True)
             history_data[f"{name}_none_date"] = today
+    else:
+        print(f"[エラー] {name}: {info}")
+        discord_post(f"[要確認] {name}: {info}")
     return True
+
+
+def parse_hm(text):
+    """'8:15' / '08:15' / '８：１５' を (8, 15) にする"""
+    t = (text or "").strip().translate(str.maketrans("０１２３４５６７８９：", "0123456789:"))
+    h, m = t.split(":")
+    return int(h), int(m)
 
 
 # ==========================================
@@ -415,8 +435,8 @@ def handle_command(driver_getter, msg_id, text, targets, history_data):
         day = now.date()
         hm = None
         for a in args:
-            if re.match(r"^\d{1,2}:\d{2}$", a):
-                hm = tuple(map(int, a.split(":")))
+            if re.match(r"^\d{1,2}[:：]\d{2}$", a):
+                hm = parse_hm(a)
             elif re.match(r"^\d{1,2}/\d{1,2}$", a):
                 mo, d = map(int, a.split("/"))
                 year = now.year - 1 if mo > now.month else now.year
@@ -426,27 +446,28 @@ def handle_command(driver_getter, msg_id, text, targets, history_data):
             return
 
         for t in buses:
-            h, m = hm or tuple(map(int, t["ride_time"].split(":")))
-            result, site_msg = search_bus_delay(driver_getter(), t, day, h, m, reply_to=msg_id)
+            h, m = hm or parse_hm(t.get("ride_time"))
+            result, info = search_bus_delay(t, day, h, m)
             label = f"{t['name']} {day.month}/{day.day} {h}:{m:02d}頃"
             if result == "found":
-                link = bus_cert_link(t, day, h, m)
-                discord_post(f"[延着証明あり] {label}" + (f"\n本物のページ: <{link}>" if link else ""),
-                             ["result.png"], msg_id)
+                report_bus_found(driver_getter, t, day, h, m, info, reply_to=msg_id)
             elif result == "none":
-                discord_post(f"[延着なし] {label}（{site_msg}）", reply_to=msg_id, silent=True)
+                discord_post(f"[延着なし] {label}（{info}）", reply_to=msg_id, silent=True)
+            else:
+                discord_post(f"[エラー] {label}: {info}", reply_to=msg_id)
 
     elif cmd in ("check", "確認"):
         if not args:
             discord_post("`!check <name>` の形で指定してください", reply_to=msg_id)
             return
-        hits = [t for t in targets if t.get("name") and args[0] in t["name"]
+        word = " ".join(args).lower()
+        hits = [t for t in targets if t.get("name") and word in t["name"].lower()
                 and (t.get("type") or "monitor").strip() == "monitor"]
         if not hits:
-            discord_post(f"「{args[0]}」を含む監視先が見つかりません", reply_to=msg_id)
+            discord_post(f"「{word}」を含む監視先が見つかりません", reply_to=msg_id)
             return
         for t in hits:
-            result = check_monitor(driver_getter(), t, history_data, screenshot=True)
+            result = check_monitor(driver_getter, t, history_data, screenshot=True)
             msg = {"first": "初回取得しました", "changed": "変化あり", "same": "変化なし"}[result]
             discord_post(f"[確認] {t['name']}: {msg}\n{t['url']}", ["check.png"], msg_id)
 
@@ -506,7 +527,7 @@ def build_cost_message(targets, history_data):
         sec = history_data.get(f"{name}_measured_sec", 30)
 
         if (t.get("type") or "").strip() == "bus_delay":
-            h, m = map(int, t["ride_time"].split(":"))
+            h, m = parse_hm(t.get("ride_time"))
             days = {(start + timedelta(days=d)).date() for d in range(30)}
             active_days = sum(1 for d in days if is_active(
                 t.get("schedule"), datetime(d.year, d.month, d.day, h, m, tzinfo=JST) + timedelta(minutes=40)))
@@ -641,16 +662,19 @@ def check_targets():
             if target_type == "bus_delay":
                 did_work = auto_bus_check(get_driver, target, history_data)
             else:
-                result = check_monitor(get_driver(), target, history_data)
+                result = check_monitor(get_driver, target, history_data)
                 if result == "changed":
                     send_discord(f"[検知] {target_name} で内容に変化がありました。\nURL: {target['url']}")
 
             history_data[f"{target_name}_last_run"] = current_time
+            history_data.pop(f"{target_name}_error", None)
 
         except Exception as e:
             print(f"[エラー] {target_name} の確認中にエラー発生: {e}")
-            if target_type == "bus_delay":
-                debug_dump(get_driver(), target_name, f"例外: {e}")
+            # 同じエラーを毎回送らないよう、エラーが始まった回だけ通知する
+            if not history_data.get(f"{target_name}_error"):
+                discord_post(f"[エラー] {target_name} の確認に失敗しました（直るまで再通知しません）\n{e}"[:1900])
+            history_data[f"{target_name}_error"] = True
 
         if did_work:
             history_data[f"{target_name}_measured_sec"] = time.time() - target_start_time
@@ -679,7 +703,7 @@ def check_targets():
         if not name:
             continue
         for key in (name, f"{name}_last_run", f"{name}_measured_sec", f"{name}_sent_date",
-                    f"{name}_none_date", f"{name}_none_msg"):
+                    f"{name}_none_date", f"{name}_none_msg", f"{name}_mode", f"{name}_error"):
             if key in history_data:
                 cleaned_history[key] = history_data[key]
 
