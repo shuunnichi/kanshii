@@ -326,11 +326,32 @@ def bus_cert_link(target, day, h, m, delay):
     return f"{base}?{q}"
 
 
+CERT_STEPS = [5, 10, 15, 20, 30, 40, 50, 60]  # 公式ページから読めなかったときの予備
+
+
+def bus_cert_minutes(target, day, h, m, delay):
+    """本物の証明書ページ（print.aspx）に書かれる区分（例: 11分→15分）を読み取る"""
+    data = bus_params(target, day, h, m)
+    data["delayTime"] = delay
+    try:
+        res = requests.post(BUS_BASE + "print.aspx", data=data, timeout=20)
+        text = res.content.decode(res.apparent_encoding or "shift_jis", errors="ignore")
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = text.translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+        hit = re.search(r"証明します[\s\S]*?(\d+)\s*分", text)
+        if hit:
+            return int(hit.group(1))
+    except Exception as e:
+        print(f"[警告] 証明書ページの読み取りに失敗: {e}")
+    return next((x for x in CERT_STEPS if x >= int(delay)), int(delay))
+
+
 def report_bus_found(get_driver, target, day, h, m, delay, reply_to=None):
-    """延着ありを文字だけで通知する（画像なし・Chrome不要）。証明書はリンク先の本物のページで見る"""
-    label = f"{target['name']} {day.month}/{day.day} {h}:{m:02d}頃の便"
+    """延着ありを文字だけで通知する。「何分遅れてよいか」（証明書の区分）を大きく表示する"""
+    cert = bus_cert_minutes(target, day, h, m, delay)
     link = bus_cert_link(target, day, h, m, delay)
-    discord_post(f"[延着証明] {label}：最大 **{delay}分** 遅延"
+    discord_post(f"# {cert}分 遅れてOK\n"
+                 f"{target['name']} {day.month}/{day.day} {h}:{m:02d}頃の便（実際の最大遅延 {delay}分）"
                  + (f"\n本物の証明書: <{link}>" if link else ""), reply_to=reply_to)
 
 
@@ -642,7 +663,8 @@ def check_targets():
         did_work = True
         try:
             if target_type == "bus_delay":
-                did_work = auto_bus_check(get_driver, target, history_data)
+                # 朝の自動確認は Apps Script（1分おき）が担当。ここでは何もしない（!delay は使える）
+                did_work = False
             else:
                 result = check_monitor(get_driver, target, history_data)
                 if result == "changed":
